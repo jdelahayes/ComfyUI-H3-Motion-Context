@@ -20,7 +20,7 @@ const CSS = `
 .h3p-head{font-size:11px;opacity:.85;min-height:14px;}
 .h3p-head.err{color:var(--error-text,#ff6b6b);opacity:1;}
 .h3p-list{display:flex;flex-direction:column;gap:1px;overflow-y:auto;}
-.h3p-item{display:grid;grid-template-columns:16px 22px 150px 1fr;gap:4px;align-items:center;padding:2px 4px;border-radius:3px;cursor:pointer;white-space:nowrap;}
+.h3p-item{display:grid;grid-template-columns:16px 22px 150px 1fr 18px;gap:4px;align-items:center;padding:2px 4px;border-radius:3px;cursor:pointer;white-space:nowrap;}
 .h3p-item:hover{background:rgba(255,255,255,.07);}
 .h3p-item.cur{background:rgba(111,139,189,.22);}
 .h3p-item .p{overflow:hidden;text-overflow:ellipsis;opacity:.8;}
@@ -34,7 +34,7 @@ const CSS = `
 .h3p-btn:disabled{opacity:.4;cursor:default;filter:none;}
 .h3p-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;font:13px/1.4 sans-serif;color:var(--input-text,#ddd);}
 .h3p-dialog{background:var(--comfy-menu-bg,#202020);border:1px solid var(--border-color,#444);border-radius:8px;box-shadow:0 10px 40px rgba(0,0,0,.5);display:flex;flex-direction:column;max-width:96vw;max-height:94vh;box-sizing:border-box;}
-.h3p-dialog.big{width:min(1240px,96vw);height:92vh;}
+.h3p-dialog.big{width:min(1420px,96vw);height:92vh;}
 .h3p-dialog.mid{width:min(860px,94vw);height:min(640px,86vh);}
 .h3p-titlebar{display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid var(--border-color,#444);}
 .h3p-titlebar h3{margin:0;font-size:14px;font-weight:600;}
@@ -47,7 +47,11 @@ const CSS = `
 .h3p-in{width:100%;box-sizing:border-box;background:var(--comfy-input-bg,#1a1a1a);color:var(--input-text,#ddd);border:1px solid var(--border-color,#444);border-radius:4px;padding:4px 6px;font:12px ui-monospace,Consolas,monospace;}
 .h3p-in.bad,.h3p-row.bad .h3p-ta{border-color:var(--error-text,#ff6b6b);}
 .h3p-table{flex:1;overflow:auto;min-height:120px;border:1px solid var(--border-color,#444);border-radius:4px;}
-.h3p-grid{display:grid;grid-template-columns:44px 104px minmax(240px,1fr) 66px 66px 84px 70px 168px;gap:6px;align-items:start;padding:6px 8px;}
+.h3p-item .s{font-size:11px;opacity:.8;}
+.h3p-seed{display:flex;gap:3px;}
+.h3p-seed .h3p-in{flex:1;min-width:0;}
+.h3p-seed .h3p-in.drawn{opacity:.6;font-style:italic;}
+.h3p-grid{display:grid;grid-template-columns:44px 104px minmax(240px,1fr) 66px 66px 84px 70px 172px 168px;gap:6px;align-items:start;padding:6px 8px;}
 .h3p-thead{position:sticky;top:0;background:var(--comfy-menu-secondary-bg,var(--comfy-menu-bg,#202020));font-size:11px;opacity:.95;border-bottom:1px solid var(--border-color,#444);z-index:1;}
 .h3p-thead .h3p-cell{padding-top:0;}
 .h3p-row{border-bottom:1px solid rgba(255,255,255,.06);}
@@ -176,9 +180,30 @@ function fmtTc(seconds) {
            : `${sign}${m}:${pad(s, 2)}.${pad(r, 3)}`;
 }
 
+// seeds: same ranges as planner.MAX_SEED / RANDOM_SEEDS
+const MAX_SEED = Number.MAX_SAFE_INTEGER;
+const RANDOM_SEEDS = 2 ** 50;
+
+function newSegment(start) {
+  return { start, prompt: "", seed: null, random: true };
+}
+
+function drawSeed() {
+  return Math.floor(Math.random() * RANDOM_SEEDS);
+}
+
+// what the seed box holds -> stored value: a number when it is one, the
+// raw text otherwise so the server names the bad seed
+function seedFromText(text) {
+  const t = String(text ?? "").trim();
+  if (!t) return null;
+  const v = Number(t);
+  return /^\d+$/.test(t) && v <= MAX_SEED ? v : t;
+}
+
 function emptyPlan() {
   return { prefix: "", suffix: "", end: "0:10",
-           segments: [{ start: "0:00", prompt: "" }] };
+           segments: [newSegment("0:00")] };
 }
 
 function clonePlan(p) {
@@ -190,16 +215,23 @@ function planToText(plan) {
   const out = [];
   if (plan.prefix) out.push("[prefix]", plan.prefix);
   if (plan.suffix) out.push("[suffix]", plan.suffix);
-  for (const s of plan.segments || []) out.push(`[${s.start}]`, s.prompt || "");
+  for (const s of plan.segments || []) out.push(`[${s.start}${seedText(s)}]`, s.prompt || "");
   if (plan.end) out.push(`[end ${plan.end}]`);
   return out.join("\n") + "\n";
+}
+
+// same output as planner._seed_text
+function seedText(s) {
+  if (s.seed == null || s.seed === "") return "";
+  return s.random !== false ? ` seed=random:${s.seed}` : ` seed=${s.seed}`;
 }
 
 function planToJson(plan) {
   return JSON.stringify({ v: 1, prefix: plan.prefix || "",
                           suffix: plan.suffix || "", end: plan.end || "",
                           segments: (plan.segments || []).map((s) => ({
-                            start: s.start, prompt: s.prompt || "" })) },
+                            start: s.start, prompt: s.prompt || "",
+                            seed: s.seed ?? null, random: s.random !== false })) },
                         null, 1);
 }
 
@@ -303,8 +335,12 @@ function render(node) {
       ? `${fmtTc(res.song_offset + clip.start / res.fps)} → ${fmtTc(res.song_offset + clip.end / res.fps)}`
       : s.start;
     row.append(mark, el("span", "", String(k)), el("span", "t", span),
-               el("span", "p", firstLine(s.prompt)));
-    row.title = "Edit this clip";
+               el("span", "p", firstLine(s.prompt)),
+               el("span", "s", s.random !== false ? "🎲" : "🔒"));
+    row.title = "Edit this clip · seed "
+      + (s.random !== false
+         ? "random" + (s.seed != null ? ` (last ${s.seed})` : "")
+         : s.seed ?? "missing");
     row.onclick = (e) => {
       e.stopPropagation();
       openEditor(node, i);
@@ -325,11 +361,34 @@ function commit(node, value) {
   } catch (e) { /* older frontend: the change is still saved with the graph */ }
 }
 
+// a random segment's seed is drawn by the node on every run; keep the one
+// just used in the plan, so the take can be fixed afterwards
+function recordSeed(node, info) {
+  const st = node._h3p;
+  const k = info?.current;
+  const seed = Number(info?.seed);
+  if (!st || !info?.random || !Number.isSafeInteger(seed) || !(k >= 1)) return;
+  const raw = planWidget(node)?.value || "";
+  let plan = null;
+  if (raw.trim().startsWith("{")) {
+    try { plan = JSON.parse(raw); } catch (e) { plan = null; }
+  } else if (st.plan) {
+    plan = clonePlan(st.plan);  // text plan: stored as JSON from now on
+  }
+  const seg = plan?.segments?.[k - 1];
+  if (!seg || seg.random === false || seg.seed === seed) return;
+  seg.seed = seed;
+  commit(node, planToJson(plan));
+  if (st.plan?.segments?.[k - 1]) st.plan.segments[k - 1].seed = seed;
+  st.editorSeed?.(k - 1, seed);
+  render(node);
+}
+
 // ------------------------------------------------------------ dialogs
 
 let zTop = 10000;
 
-function modal({ title, size = "mid", onKey }) {
+function modal({ title, size = "mid", onKey, onClose }) {
   injectCss();
   const overlay = el("div", "h3p-overlay");
   overlay.style.zIndex = String(++zTop);
@@ -350,7 +409,7 @@ function modal({ title, size = "mid", onKey }) {
   overlay.addEventListener("keyup", (e) => e.stopPropagation());
   document.body.append(overlay);
   return { overlay, dialog, bar, sum, body, foot,
-           close: () => overlay.remove() };
+           close: () => { overlay.remove(); onClose?.(); } };
 }
 
 function textDialog({ title, value, readOnly, okLabel, onOk, extra }) {
@@ -402,7 +461,7 @@ function openEditor(node, focusIndex = null) {
     // with the error, rather than dropping it on the floor
     if (raw && raw !== "[0:00]\n\n[end 0:10]".trim()) pendingImport = raw;
   }
-  const initial = planToJson(draft);
+  let initial = planToJson(draft);
   const head = readHead();
   const cur = currentClip();
   const done = st.done || new Set();
@@ -417,7 +476,23 @@ function openEditor(node, focusIndex = null) {
       if (e.key === "Escape") cancel();
       else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) apply();
     },
+    onClose: () => { if (st.editorSeed === takeSeed) st.editorSeed = null; },
   });
+
+  // a seed drawn by a run while the editor is open goes into the draft
+  // too, and into the baseline so it alone does not count as an edit
+  function takeSeed(i, seed) {
+    const seg = draft.segments[i];
+    if (!seg || seg.random === false) return;
+    seg.seed = seed;
+    if (rowEls[i]) rowEls[i].seedIn.value = seed;
+    const base = JSON.parse(initial);
+    if (base.segments[i] && base.segments[i].random !== false) {
+      base.segments[i].seed = seed;
+      initial = planToJson(base);
+    }
+  }
+  st.editorSeed = takeSeed;
 
   // prefix / suffix
   const fixes = el("div", "h3p-split");
@@ -448,9 +523,12 @@ function openEditor(node, focusIndex = null) {
     ["Keep", "Frames delivered after the Trim node removes the head"],
     ["Cut", "Where the clip really ends"],
     ["Error", "Cut minus the next timecode"],
+    ["Seed", "Sampler seed (Planner seed output). 🎲 random: a new seed every run, "
+      + "the last one drawn shown in grey. 🔒 fixed: this seed every run. "
+      + "Typing a seed fixes it."],
     ["", ""],
   ]) {
-    const c = el("div", t === "#" || t === "Start" || t === "Prompt" ? "" : "h3p-cell", t);
+    const c = el("div", ["#", "Start", "Prompt", "Seed"].includes(t) ? "" : "h3p-cell", t);
     c.title = tip;
     thead.append(c);
   }
@@ -467,7 +545,7 @@ function openEditor(node, focusIndex = null) {
                         () => {
     const end = parseTc(draft.end);
     const start = Number.isFinite(end) ? end : 0;
-    draft.segments.push({ start: fmtTc(start), prompt: "" });
+    draft.segments.push(newSegment(fmtTc(start)));
     draft.end = fmtTc(start + 10);
     endIn.value = draft.end;
     buildRows(draft.segments.length - 1);
@@ -517,6 +595,39 @@ function openEditor(node, focusIndex = null) {
       const del = el("div", "h3p-cell", "—");
       const cut = el("div", "h3p-cell", "—");
       const err = el("div", "h3p-cell", "—");
+      const seedBox = el("div", "h3p-seed");
+      const seedIn = el("input", "h3p-in");
+      seedIn.value = seg.seed ?? "";
+      const seedBtn = button("", "", () => {
+        if (seg.random !== false) {
+          // keep the take: the last drawn seed, or a new one if none yet
+          seg.random = false;
+          if (seg.seed == null || seg.seed === "") seg.seed = drawSeed();
+          seedIn.value = seg.seed;
+        } else {
+          seg.random = true;
+        }
+        paintSeed();
+        schedule(0);
+      }, "small");
+      const paintSeed = () => {
+        const rnd = seg.random !== false;
+        seedBtn.textContent = rnd ? "🎲" : "🔒";
+        seedBtn.title = rnd
+          ? "Random: a new seed every run. Click to fix the seed shown (keeps that take)."
+          : "Fixed: this seed every run. Click to go back to random.";
+        seedIn.placeholder = rnd ? "random" : "seed";
+        seedIn.title = rnd ? "Last seed drawn for this clip" : "Seed used every run";
+        seedIn.classList.toggle("drawn", rnd);
+      };
+      seedIn.oninput = () => {
+        seg.seed = seedFromText(seedIn.value);
+        if (seg.seed != null) seg.random = false;
+        paintSeed();
+        schedule();
+      };
+      paintSeed();
+      seedBox.append(seedIn, seedBtn);
       const acts = el("div", "h3p-acts");
       acts.append(
         button("⤢", "Edit this prompt full size", () => {
@@ -537,9 +648,9 @@ function openEditor(node, focusIndex = null) {
       acts.children[2].disabled = i === 0;
       acts.children[3].disabled = i === draft.segments.length - 1;
       acts.children[5].disabled = draft.segments.length === 1;
-      row.append(num, start, prompt, gen, del, cut, err, acts);
+      row.append(num, start, prompt, gen, del, cut, err, seedBox, acts);
       rowsBox.append(row);
-      return { row, start, prompt, gen, del, cut, err };
+      return { row, start, prompt, gen, del, cut, err, seedIn };
     });
     requestAnimationFrame(() => {
       rowEls.forEach((r) => autosize(r.prompt));
@@ -568,7 +679,7 @@ function openEditor(node, focusIndex = null) {
       ? parseTc(draft.segments[i + 1].start) : parseTc(draft.end);
     const mid = Number.isFinite(a) && Number.isFinite(next) ? (a + next) / 2 : a;
     draft.segments.splice(i + 1, 0,
-      { start: Number.isFinite(mid) ? fmtTc(mid) : "", prompt: "" });
+      newSegment(Number.isFinite(mid) ? fmtTc(mid) : ""));
     buildRows(i + 1);
     schedule(0);
   }
@@ -592,6 +703,7 @@ function openEditor(node, focusIndex = null) {
     rowEls.forEach((r) => {
       r.row.classList.remove("bad");
       r.start.classList.remove("bad");
+      r.seedIn.classList.remove("bad");
       for (const c of [r.gen, r.del, r.cut, r.err]) c.textContent = "—";
     });
     if (!res) {
@@ -605,6 +717,10 @@ function openEditor(node, focusIndex = null) {
       if (t.row != null && rowEls[t.row]) {
         rowEls[t.row].row.classList.add("bad");
         rowEls[t.row].start.classList.add("bad");
+        if (/seed/.test(res.error)) {
+          rowEls[t.row].start.classList.remove("bad");
+          rowEls[t.row].seedIn.classList.add("bad");
+        }
       }
       if (t.end) endIn.classList.add("bad");
       return;
@@ -814,6 +930,12 @@ app.registerExtension({
       attach(this);
       hidePlanWidget(this);
       setTimeout(() => refresh(this), 0);
+      return r;
+    };
+    const onExecuted = nodeType.prototype.onExecuted;
+    nodeType.prototype.onExecuted = function (output) {
+      const r = onExecuted?.apply(this, arguments);
+      recordSeed(this, output?.h3_plan?.[0]);
       return r;
     };
     const onRemoved = nodeType.prototype.onRemoved;

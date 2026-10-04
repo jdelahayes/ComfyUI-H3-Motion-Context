@@ -36,6 +36,10 @@ noise_mask). Use 0.3.1 on anything older.
   lengths and cut errors, full-size prompt editing, final-prompt
   preview, insert/delete/swap, and text import/export. Editing the
   timing of a clip already on disk asks first.
+- Planner seeds: a sampler seed per segment and a `seed` output (added
+  last, so existing links keep their slots). Random draws a new seed
+  every run and the editor records the one used; fixed repeats it.
+  Text plans write it on the tag: `[0:10 seed=4711]`.
 - Chain shows `plan k/N` with a Planner in the graph and stops after the
   last clip; Chain and Approve refuse to go past it.
 - Trim `tail_trim`: frames off the end, picture and sound together.

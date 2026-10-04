@@ -290,7 +290,17 @@ Planner  prompt      -> text encoder
          song_offset -> Audio Lock
          tail_trim   -> Trim
          report      -> Preview Text
+         seed        -> sampler seed / noise_seed
 ```
+
+Each segment also carries the sampler seed for its clip, in the
+editor's Seed column. 🎲 random draws a new seed every run, so
+Run/Re-roll gives a new take, and the seed just used is written back
+into the plan (shown in grey). 🔒 fixed uses the same seed every run:
+click 🎲 on a take you like to keep it, or type a seed. In plan text the
+seed rides on the segment's tag: `[0:10]` random, `[0:10
+seed=random:4711]` random with 4711 the last drawn, `[0:10 seed=4711]`
+fixed. Seeds go up to 2^53-1.
 
 Nothing to set per clip. The Planner reads which clip is being made from
 the Save Latent node's `clip_index` and the pinned head from Motion

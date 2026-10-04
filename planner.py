@@ -55,12 +55,28 @@ A line is a tag only when it parses as one, so prompt lines in brackets
 are kept as text. JSON:
 
     {"v": 1, "prefix": "...", "suffix": "...", "end": "0:19.917",
-     "segments": [{"start": "0:00", "prompt": "..."}, ...]}
+     "segments": [{"start": "0:00", "prompt": "...",
+                   "seed": 123, "random": false}, ...]}
+
+Seeds
+-----
+Each segment carries the sampler seed for its clip. A random segment
+draws a fresh seed on every run (Run/Re-roll gives a new take) and the
+editor writes the seed drawn back into the plan, so the take that worked
+can be kept by switching the segment to fixed. A fixed segment always
+hands over the same seed. In text, on the segment's tag:
+
+    [0:10]                    random, nothing drawn yet
+    [0:10 seed=random:4711]   random, last drawn 4711
+    [0:10 seed=4711]          fixed at 4711
+
+Seeds stay under 2**53 so the browser holds them exactly.
 """
 
 import json
 import logging
 import math
+import random
 import re
 
 _LOG = logging.getLogger("h3_motion_context")
@@ -71,8 +87,11 @@ SAVE_NODE = "MiniMaxH3MotionContextSaveLatent"
 LOAD_NODE = "MiniMaxH3MotionContextLoadLatent"
 CONTEXT_NODE = "MiniMaxH3MotionContext"
 SONG_END_KEY = "h3_song_end"  # same key as nodes.SONG_END_KEY
+MAX_SEED = 2 ** 53 - 1  # largest integer a browser number holds exactly
+RANDOM_SEEDS = 2 ** 50  # drawn seeds, same range as the frontend's randomize
 
 _TAG = re.compile(r"^\s*\[\s*([^\[\]]+?)\s*\]\s*$")
+_SEED_TAG = re.compile(r"^(.*?)\s+seed\s*=\s*(\S+)$", re.IGNORECASE)
 
 
 class PlanError(ValueError):
@@ -125,6 +144,60 @@ def _is_timecode(text):
         return False
 
 
+# ------------------------------------------------------------------ seeds
+
+def _seed_value(value, where):
+    """None, an int or digits -> a seed (or None)."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    seed = None
+    if isinstance(value, int) and not isinstance(value, bool):
+        seed = value
+    elif isinstance(value, str) and value.strip().isdigit():
+        seed = int(value.strip())
+    if seed is None or seed < 0 or seed > MAX_SEED:
+        raise PlanError("%s: seed must be a whole number from 0 to %d, got %r"
+                        % (where, MAX_SEED, value))
+    return seed
+
+
+def _segment_tag(tag):
+    """'0:10', '0:10 seed=4711' or '0:10 seed=random[:4711]' ->
+    (start, seed, random), or None when the tag is not a segment start."""
+    m = _SEED_TAG.match(tag)
+    start, spec = (m.group(1).strip(), m.group(2)) if m else (tag, None)
+    if not _is_timecode(start):
+        return None
+    if spec is None:
+        return start, None, True
+    where = "[%s]" % tag
+    if spec.lower().startswith("random"):
+        rest = spec[len("random"):]
+        if not rest:
+            return start, None, True
+        if rest.startswith(":"):
+            return start, _seed_value(rest[1:], where), True
+        raise PlanError("%s: write seed=random, seed=random:N or seed=N"
+                        % where)
+    return start, _seed_value(spec, where), False
+
+
+def draw_seed():
+    return random.SystemRandom().randrange(RANDOM_SEEDS)
+
+
+def clip_seed(segment, index):
+    """The seed clip `index` (1-based) renders with: drawn for a random
+    segment, the stored one for a fixed segment."""
+    if segment.get("random", True):
+        return draw_seed()
+    seed = segment.get("seed")
+    if seed is None:
+        raise PlanError("segment %d is set to a fixed seed but has none: "
+                        "enter one or switch it to random" % index)
+    return seed
+
+
 # ------------------------------------------------------------- plan format
 
 def parse_plan(text):
@@ -145,8 +218,11 @@ def parse_plan(text):
             "suffix": str(data.get("suffix") or ""),
             "end": str(data.get("end") or ""),
             "segments": [{"start": str(s.get("start", "")),
-                          "prompt": str(s.get("prompt") or "")}
-                         for s in segs],
+                          "prompt": str(s.get("prompt") or ""),
+                          "seed": _seed_value(s.get("seed"),
+                                              "segment %d" % (i + 1)),
+                          "random": bool(s.get("random", True))}
+                         for i, s in enumerate(segs)],
         }
 
     plan = {"prefix": "", "suffix": "", "end": "", "segments": []}
@@ -173,6 +249,7 @@ def parse_plan(text):
         m = _TAG.match(line)
         tag = m.group(1) if m else None
         low = (tag or "").lower()
+        seg = _segment_tag(tag) if tag is not None else None
         if tag is not None and low in ("prefix", "suffix"):
             flush()
             target = low
@@ -181,9 +258,10 @@ def parse_plan(text):
             flush()
             plan["end"] = tag[3:].strip()
             target = "end"
-        elif tag is not None and _is_timecode(tag):
+        elif seg is not None:
             flush()
-            target = {"start": tag, "prompt": ""}
+            target = {"start": seg[0], "prompt": "",
+                      "seed": seg[1], "random": seg[2]}
             plan["segments"].append(target)
         else:
             buf.append(line)
@@ -198,17 +276,32 @@ def plan_to_text(plan):
     if plan.get("suffix"):
         out += ["[suffix]", plan["suffix"]]
     for seg in plan.get("segments", []):
-        out += ["[%s]" % seg["start"], seg.get("prompt", "")]
+        out += ["[%s%s]" % (seg["start"], _seed_text(seg)),
+                seg.get("prompt", "")]
     if plan.get("end"):
         out.append("[end %s]" % plan["end"])
     return "\n".join(out) + "\n"
+
+
+def _seed_text(seg):
+    seed = seg.get("seed")
+    if seed is None:
+        return ""
+    if seg.get("random", True):
+        return " seed=random:%d" % seed
+    return " seed=%d" % seed
 
 
 def plan_to_json(plan):
     return json.dumps({"v": 1, "prefix": plan.get("prefix", ""),
                        "suffix": plan.get("suffix", ""),
                        "end": plan.get("end", ""),
-                       "segments": plan.get("segments", [])},
+                       "segments": [
+                           {"start": s.get("start", ""),
+                            "prompt": s.get("prompt", ""),
+                            "seed": s.get("seed"),
+                            "random": bool(s.get("random", True))}
+                           for s in plan.get("segments", [])]},
                       ensure_ascii=False, indent=1)
 
 
@@ -263,6 +356,10 @@ def compute(plan, head, fps=FPS):
     head = int(head)
     if head < 0:
         raise PlanError("head must be 0 or more")
+    for i, seg in enumerate(segs):
+        if not seg.get("random", True) and seg.get("seed") is None:
+            raise PlanError("segment %d is set to a fixed seed but has none: "
+                            "enter one or switch it to random" % (i + 1))
 
     times = []
     for i, seg in enumerate(segs):
@@ -439,9 +536,10 @@ class MiniMaxH3MotionContextPlanner:
             "hidden": {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("STRING", "FLOAT", "INT", "FLOAT", "INT", "STRING")
+    # seed is last so graphs saved before it keep their links
+    RETURN_TYPES = ("STRING", "FLOAT", "INT", "FLOAT", "INT", "STRING", "INT")
     RETURN_NAMES = ("prompt", "seconds", "frames", "song_offset",
-                    "tail_trim", "report")
+                    "tail_trim", "report", "seed")
     OUTPUT_TOOLTIPS = (
         "This clip's prompt, prefix and suffix included. Wire it to the "
         "H3 text encoder.",
@@ -457,6 +555,9 @@ class MiniMaxH3MotionContextPlanner:
         "tail_trim.",
         "The whole plan as text: each clip's lengths, cut and error, the "
         "clip being made marked. Wire it to a text preview.",
+        "This clip's sampler seed. Wire it to the sampler's seed (or "
+        "noise_seed). A random segment draws a new one each run and the "
+        "editor records it; a fixed segment always gives the same one.",
     )
     FUNCTION = "plan_clip"
     CATEGORY = "conditioning/minimax"
@@ -465,7 +566,7 @@ class MiniMaxH3MotionContextPlanner:
                    "length to render, snapped to H3's frame grid with each "
                    "cut as close to its timecode as the grid allows. "
                    "song_offset goes to Audio Lock, tail_trim to the Trim "
-                   "node.")
+                   "node, seed to the sampler.")
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
@@ -501,22 +602,31 @@ class MiniMaxH3MotionContextPlanner:
                     % (k, format_timecode(expected), k - 1,
                        format_timecode(float(song_end)), k - 1))
 
+        segment = parsed["segments"][k - 1]
+        seed = clip_seed(segment, k)
+        how = "random" if segment.get("random", True) else "fixed"
         is_last = k == count
         tail = result["tail_trim"] if is_last else 0
-        text = report(result, current=k)
+        text = report(result, current=k) + "\nclip %d seed %d (%s)" % (
+            k, seed, how)
         _LOG.info("h3_motion_context: planner clip %d/%d, %d frames "
-                  "(%d delivered), cut at %s, tail_trim %d", k, count,
-                  clip["generated"], clip["delivered"],
+                  "(%d delivered), cut at %s, tail_trim %d, seed %d (%s)",
+                  k, count, clip["generated"], clip["delivered"],
                   format_timecode(result["song_offset"]
-                                  + clip["end"] / float(fps)), tail)
+                                  + clip["end"] / float(fps)), tail,
+                  seed, how)
+        # the editor writes a drawn seed back into the plan, so a take
+        # that worked can be kept by switching the segment to fixed
         return {
-            "ui": {"h3_plan": [{"clips": count, "current": k}]},
+            "ui": {"h3_plan": [{"clips": count, "current": k,
+                                "seed": seed, "random": how == "random"}]},
             "result": (compose_prompt(parsed, k - 1),
                        clip["generated"] / float(fps),
                        clip["generated"],
                        float(result["song_offset"]),
                        tail,
-                       text),
+                       text,
+                       seed),
         }
 
 
