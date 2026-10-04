@@ -126,6 +126,15 @@ class MiniMaxH3MotionContextAudioLock:
 
     RETURN_TYPES = ("LATENT", "AUDIO", "FLOAT")
     RETURN_NAMES = ("av_latent", "exact_audio", "song_position")
+    OUTPUT_TOOLTIPS = (
+        "The AV latent with the song encoded as target audio and masked "
+        "out of denoising. Wire it to the sampler in place of the empty "
+        "latent. Carries the song position for Save Latent.",
+        "The song cut to this clip, pinned head included. Wire it into "
+        "the Trim node's audio, then mux Trim's audio into the video.",
+        "Seconds into the song where this clip's delivered part starts "
+        "(after the pinned head). For display or checking.",
+    )
     FUNCTION = "lock"
     CATEGORY = "conditioning/minimax"
     DESCRIPTION = ("Encode the exact song into the H3 target audio and mask "

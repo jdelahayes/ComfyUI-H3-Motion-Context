@@ -442,6 +442,22 @@ class MiniMaxH3MotionContextPlanner:
     RETURN_TYPES = ("STRING", "FLOAT", "INT", "FLOAT", "INT", "STRING")
     RETURN_NAMES = ("prompt", "seconds", "frames", "song_offset",
                     "tail_trim", "report")
+    OUTPUT_TOOLTIPS = (
+        "This clip's prompt, prefix and suffix included. Wire it to the "
+        "H3 text encoder.",
+        "Length to render in seconds, pinned head included (frames/24). "
+        "Wire it where you type the clip length; the stock length formula "
+        "gives frames back unchanged.",
+        "Length to render in frames, pinned head included, on H3's "
+        "17m+5 grid. Use it instead of seconds on inputs that take frames.",
+        "Seconds into the song of the plan's first timecode. Wire it to "
+        "Audio Lock's song_offset; only the first clip uses it.",
+        "Frames to cut off the end: 0 except on the last clip, where it "
+        "removes the overshoot past the end timecode. Wire it to Trim's "
+        "tail_trim.",
+        "The whole plan as text: each clip's lengths, cut and error, the "
+        "clip being made marked. Wire it to a text preview.",
+    )
     FUNCTION = "plan_clip"
     CATEGORY = "conditioning/minimax"
     DESCRIPTION = ("Plan a chain from timecodes. For the clip being made "
