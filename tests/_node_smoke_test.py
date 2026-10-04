@@ -238,6 +238,20 @@ def main():
     assert "minimax_frame_count" not in captured
     assert trim == 22
 
+    # pin_audio off (song locked by Audio Lock): the picture is pinned
+    # exactly as before, and no audio keyframe or reference is added
+    _, trim_off = run(
+        conditioning=[["c", {}]], vae=VAE(), latent=target,
+        context_frames=context, context_length="22",
+        audio_context_length=22, context_latent=prev, pin_audio=False)
+    off = captured["minimax_keyframes"]
+    assert len(off) == 7 and all(k.get("latent") is not None for k in off)
+    assert "minimax_refs" not in captured and trim_off == 22
+    print("pin_audio off: 7 video keyframes, no pinned audio")
+    run(conditioning=[["c", {}]], vae=VAE(), latent=target,
+        context_frames=context, context_length="22",
+        audio_context_length=22, context_latent=prev)
+
     # the index is rt / FRAME_RESCALE frames before the end coordinate, so
     # the window ENDS at the join rather than starting there. Here the
     # audio and video windows are both 22 frames, so it starts exactly at
@@ -490,6 +504,36 @@ def main():
         assert got == want, (f, direction, got, want)
         # and the drift the node reports must be under half a sample
         assert abs(got / sr - (f - 22) / 24.0) * 1000.0 < 0.02, (f, got)
+    # tail_trim: the Planner's overshoot comes off the end, picture and
+    # sound together, and match_tail still lands on the frame
+    sr, f = 32000, 260
+    have = int(round(round(nodes.FRAME_RESCALE * f) / nodes.AUDIO_HZ * sr))
+    imgs = T(np.arange(f, dtype=np.float32).reshape(f, 1, 1, 1)
+             * np.ones((1, 8, 8, 3), dtype=np.float32))
+    wav = T(np.zeros((1, 2, have), dtype=np.float32))
+    for match in (True, False):
+        out_i, out_a = trimmer.trim(
+            images=imgs, trim_frames=22,
+            audio={"waveform": wav, "sample_rate": sr}, fps=24.0,
+            match_tail=match, tail_trim=3)
+        assert out_i.shape[0] == f - 25, out_i.shape
+        assert float(out_i.a[0, 0, 0, 0]) == 22.0
+        assert float(out_i.a[-1, 0, 0, 0]) == f - 4.0
+        want = int(round((f - 25) / 24.0 * sr))
+        got = int(out_a["waveform"].shape[-1])
+        # without match_tail the file end decides, so H3's grid
+        # rounding (up to a third of a step) is still in there
+        tol = 0 if match else int(sr / nodes.AUDIO_HZ / 3) + 1
+        assert abs(got - want) <= tol, (match, got, want)
+    try:
+        trimmer.trim(images=imgs, trim_frames=200, tail_trim=60)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("head + tail longer than the clip accepted")
+    print("tail_trim check: 3 frames off the end of picture and sound, "
+          "head and tail together refused when they eat the clip")
+
     print("match_tail check: long tail trimmed, short tail padded, all "
           "three residues land on the exact sample count")
 

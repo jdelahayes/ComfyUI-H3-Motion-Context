@@ -207,6 +207,110 @@ different content would fight it. Older versions silently replaced both
 anchors, so if a chain graph carried a last-frame target before this
 version, it never reached the model.
 
+### Music video: locking your own song
+
+When the soundtrack already exists, don't let H3 generate one. Put
+**H3 Motion Context Audio Lock** between the stock conditioning node's
+latent and the sampler:
+
+```
+stock H3 conditioning node
+  latent -> H3 Motion Context Audio Lock -> sampler
+              audio_vae      <- H3 audio VAE
+              audio          <- the WHOLE song, untrimmed
+              trim_frames    <- from H3 Motion Context
+              context_latent <- the same Load Latent output
+              exact_audio    -> H3 Motion Context Trim (audio)
+```
+
+The song is encoded into the clip's audio latent and masked out of
+denoising, so H3 renders picture only while attending to your track.
+ComfyUI's H3 support does the masking natively; nothing is patched.
+
+The node works out where each clip sits in the song. `song_offset` is
+where the first clip starts. After that the position travels with the
+latent: Audio Lock writes where the clip's delivered picture ends, Save
+Latent stores it, Load Latent hands it to the next clip. Because the
+pinned head replays the previous clip's tail, the next clip's window
+starts `trim_frames / 24` seconds before that point, and the Trim node
+takes it off again. You never type an offset after the first clip.
+
+Wire `exact_audio` into the Trim node instead of the decoded audio. It is
+the real song cut to the clip, not a VAE reconstruction of it. Mono
+songs are fine, so is any sample rate. Past the end of the song is
+silence.
+
+Turn **pin_audio** off on Motion Context in these graphs. The song
+already continues itself, and the pinned rows would only cost compute.
+
+A previous clip rendered without Audio Lock has no song position, and
+the node refuses rather than guess. Unwire `context_latent` from Audio
+Lock and set `song_offset` by hand to start mid-chain.
+
+### Planning a chain from timecodes
+
+**H3 Motion Context Planner** turns a list of cut points into clip
+lengths and prompts. The node shows the plan clip by clip (✓ made, ▶
+being made); **Edit plan**, or a click on a clip, opens the editor: a
+table with one row per segment, its start, its prompt in a box as tall
+as the prompt, and what the render will be (frames rendered and kept,
+where the cut really lands, how far from the timecode). It recomputes
+as you type, with the same code the node runs. Per row: ⤢ edits the
+prompt full size, 👁 shows the final prompt H3 gets, ↑↓ swap prompts
+(timecodes stay put), + inserts a segment halfway to the next cut, ✕
+deletes one (its time joins the segment before). Editing the timing of
+a clip that is already on disk asks first, since the chain can no
+longer continue from it. Edits apply from the next queued clip, so
+prompts can be fixed while a chain runs.
+
+**Import text** and **Export text** move the plan in and out as plain
+text, for writing it in another editor or keeping it with the project:
+
+```
+[prefix]
+Use <Picture 1> as the exact character identity and scene anchor...
+[suffix]
+No text, no logo, no extra people.
+[0:00]
+Close-up of the singer,
+slow push-in.
+[0:10]
+Wide shot, the camera pulls back.
+[end 0:19.917]
+```
+
+One `[timecode]` per cut with that segment's prompt under it, as many
+lines as you like, and `[end ...]` last. The prefix and suffix are added
+to every prompt. Timecodes take `62.5`, `1:02.5` or `0:01:02.500`.
+
+```
+Planner  prompt      -> text encoder
+         seconds     -> your clip length input (frames/24, goes back
+                        through the stock length formula unchanged)
+         song_offset -> Audio Lock
+         tail_trim   -> Trim
+         report      -> Preview Text
+```
+
+Nothing to set per clip. The Planner reads which clip is being made from
+the Save Latent node's `clip_index` and the pinned head from Motion
+Context's `context_length`, so Run/Re-roll, Approve and Chain all work
+as before. Clip lengths are snapped to H3's 17m+5 grid, to the nearest
+length for every cut but the last and up for the last. Each clip starts
+where the previous one really ended, so a cut lands within 8 frames
+(0.33 s) of its timecode and the error never builds up down a chain.
+The last clip's overshoot goes out on `tail_trim`.
+
+With a Planner in the graph, the Chain node shows `plan k/N` and stops
+after the last clip; Chain and Approve refuse to run past it.
+
+With Audio Lock wired, the Planner checks that the previous clip ended
+where the plan says it should. Editing timecodes, or the head, after
+clips were made gets a refusal naming where to regenerate from.
+
+Segments longer than 362 frames (about 15 s, H3's trained maximum) are
+refused with where to add a cut.
+
 ## Settings
 
 Two, because everything else had exactly one right answer.
@@ -373,12 +477,15 @@ that config.
 
 ## Testing
 
-Six scripts, all runnable without ComfyUI or a GPU.
+Eight scripts, all runnable without ComfyUI or a GPU. The Audio Lock
+test needs torch, so run it with ComfyUI's own Python.
 
 ```
 python tests/_mock_harness.py        # the layout checks against a fake stock model
 python tests/_node_smoke_test.py     # the node end to end, refs + save/load
 python tests/_probe_node_test.py     # the seam probe node, joins with known answers
+python tests/_audio_lock_test.py     # song position across a chain, needs torch
+python tests/_planner_test.py        # clip lengths and prompts from timecodes
 python tests/seam_probe.py A.flac B_untrimmed.flac    # is the join real continuation?
 python tests/level_step.py clip*.flac                 # does the level or room tone jump?
 python tests/freeze_detect.py clip*.mp4               # did a held shot render as a still?
@@ -469,9 +576,13 @@ Open an issue.
 |---|---|
 | `layout_contract.py` | Proves ComfyUI still places anchors and pinned audio where this pack needs them, once, before the first render. Modifies nothing. |
 | `nodes.py` | The four core nodes: Motion Context, Trim, and the latent Save/Load pair. |
+| `audio_lock.py` | The Audio Lock node: locks your song into the clip and positions it in the chain. |
+| `planner.py` | The Planner node: clip lengths and prompts from timecodes, and the `/plan` route. |
 | `probe_node.py` | The Seam Probe node: measures a join in-graph, with the seam at a known sample instead of inferred from file ends. |
 | `tests/seam_probe.py` | Is a join's audio a real continuation, a sound-alike, or drifting. |
 | `tests/level_step.py` | Level and room-tone continuity at each join. Also catches sample-rate mismatches. |
 | `tests/freeze_detect.py` | Stretches where the picture stops moving. |
 | `tests/_mock_harness.py`, `tests/_node_smoke_test.py`, `tests/_probe_node_test.py` | Layout, node and probe tests, numpy only. |
+| `tests/_audio_lock_test.py` | Audio Lock placement with known answers, needs torch. |
+| `tests/_planner_test.py` | Planner lengths, prompts and graph lookup, plain Python. |
 | `CHANGELOG.md` | What changed in each release, and which ComfyUI H3 layout it works with. |

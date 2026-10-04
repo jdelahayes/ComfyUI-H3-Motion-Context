@@ -76,6 +76,12 @@ FPS = 24  # H3's native rate; audio latents run at 40 Hz, hence FRAME_RESCALE 5/
 FRAME_RESCALE = 5.0 / 3.0
 AUDIO_HZ = 40.0
 
+# Latent dict key, and safetensors metadata key, for the song position (in
+# seconds) where a clip's delivered picture ends. Written by Audio Lock,
+# carried through the sampler, saved and loaded with the latent, read by
+# the next clip's Audio Lock.
+SONG_END_KEY = "h3_song_end"
+
 # Run lengths the video VAE's downscale formula max(1, (n - 5) // 17 * 5 + 2)
 # actually distinguishes. Anything between two grid points encodes to the same
 # number of latent steps as the lower one, but the steps then cover the FIRST
@@ -368,6 +374,13 @@ class MiniMaxH3MotionContext:
                                "matching the pinned frames is encoded and "
                                "pinned alongside them. Ignored when "
                                "context_latent is wired."}),
+                "pin_audio": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Pin the previous clip's tail sound so the "
+                               "model continues it. Turn off when the "
+                               "soundtrack is locked with Audio Lock: the "
+                               "song already continues itself, and the "
+                               "pinned rows would only cost compute."}),
             },
         }
 
@@ -386,7 +399,8 @@ class MiniMaxH3MotionContext:
 
     def apply(self, conditioning, vae, latent, context_length,
               audio_context_length=24, context_frames=None,
-              context_latent=None, audio_vae=None, context_audio=None):
+              context_latent=None, audio_vae=None, context_audio=None,
+              pin_audio=True):
         if context_latent is None and context_frames is None:
             return (conditioning, 0)
         encode_mode, anchor_mode = ENCODE_MODE, ANCHOR_MODE
@@ -535,7 +549,8 @@ class MiniMaxH3MotionContext:
         audio_end_frame = None
         a_frames = 0
         audio_src = "off"
-        if context_latent is not None or context_audio is not None:
+        if pin_audio and (context_latent is not None
+                          or context_audio is not None):
             # the audio window is independent of the video one: audio cond
             # rows cost rows but never cost delivered frames
             a_frames = int(audio_context_length) or span
@@ -734,6 +749,14 @@ class MiniMaxH3MotionContextTrim:
                                "carries about 8ms too much or too little "
                                "sound, which accumulates at every join in a "
                                "chain."}),
+                "tail_trim": ("INT", {
+                    "default": 0, "min": 0, "max": 4096,
+                    "tooltip": "Frames to drop off the END, picture and "
+                               "sound together. Wire from the Planner: it "
+                               "is 0 on every clip but the last, where it "
+                               "removes the overshoot past the final "
+                               "timecode. Never use it mid-chain: the next "
+                               "clip continues from the latent's real end."}),
             },
         }
 
@@ -744,14 +767,16 @@ class MiniMaxH3MotionContextTrim:
     DESCRIPTION = ("Remove the leading pinned frames from a decoded H3 clip, "
                    "trimming picture and sound by the same duration.")
 
-    def trim(self, images, trim_frames, audio=None, fps=24.0, match_tail=True):
+    def trim(self, images, trim_frames, audio=None, fps=24.0, match_tail=True,
+             tail_trim=0):
         n = max(0, int(trim_frames))
+        tail = max(0, int(tail_trim))
         total = int(images.shape[0])
-        if n >= total:
+        if n + tail >= total:
             raise ValueError(
                 "h3_motion_context: asked to trim %d frames from a %d frame clip"
-                % (n, total))
-        out_images = images[n:] if n else images
+                % (n + tail, total))
+        out_images = images[n:total - tail] if n or tail else images
 
         out_audio = audio
         if audio is not None:
@@ -766,9 +791,16 @@ class MiniMaxH3MotionContextTrim:
                     "leave nothing. Check that fps matches the clip."
                     % (seconds, length / sr))
             waveform = waveform[..., cut:]
+            frames_left = total - n - tail
+
+            if tail and not match_tail:
+                # without match_tail the end is the file's end, so the
+                # tail comes off that; with it, frames_left already
+                # excludes the tail and the cut below lands on the frame
+                drop = int(round(tail / float(fps) * sr))
+                waveform = waveform[..., :max(1, int(waveform.shape[-1]) - drop)]
 
             if match_tail:
-                frames_left = total - n
                 want = int(round(frames_left / float(fps) * sr))
                 have = int(waveform.shape[-1])
                 if have > want:
@@ -799,14 +831,15 @@ class MiniMaxH3MotionContextTrim:
             out_audio = {"waveform": waveform, "sample_rate": sr}
             _LOG.info("h3_motion_context: %d frames / %.4fs picture, %.4fs sound, "
                       "drift %.2fms",
-                      total - n, (total - n) / float(fps),
+                      frames_left, frames_left / float(fps),
                       int(waveform.shape[-1]) / sr,
-                      abs((total - n) / float(fps) - int(waveform.shape[-1]) / sr) * 1000.0)
-        elif n:
-            _LOG.info("h3_motion_context: trimmed %d leading frames, %d remain. "
-                      "No audio wired; if this clip has sound, mux it through "
-                      "this node or it will run %.3fs ahead of the picture.",
-                      n, total - n, n / float(fps))
+                      abs(frames_left / float(fps) - int(waveform.shape[-1]) / sr) * 1000.0)
+        elif n or tail:
+            _LOG.info("h3_motion_context: trimmed %d leading and %d trailing "
+                      "frames, %d remain. No audio wired; if this clip has "
+                      "sound, mux it through this node or it will run %.3fs "
+                      "ahead of the picture.",
+                      n, tail, total - n - tail, n / float(fps))
 
         return (out_images, out_audio)
 
@@ -962,14 +995,27 @@ def register_chain_routes():
     register_chain_routes._done = True
 
 
-def _write_safetensors(path, tensors):
+def _read_song_end(path):
+    """Song position stored by Save Latent, or None. Never fatal: files
+    from older versions, and clips rendered without Audio Lock, have none."""
+    try:
+        from safetensors import safe_open
+        with safe_open(path, framework="pt") as f:
+            value = (f.metadata() or {}).get(SONG_END_KEY)
+        return None if value is None else float(value)
+    except Exception:
+        return None
+
+
+def _write_safetensors(path, tensors, extra_metadata=None):
     # safetensors load_file memory-maps on Windows. Overwriting a mapped
     # slot (re-roll, or Load 0 aimed at the file Save is about to replace)
     # fails with os error 1224. Write a sibling temp file and replace.
     tmp = path + ".tmp"
+    metadata = {"format": "h3_motion_context_av_v1"}
+    metadata.update(extra_metadata or {})
     try:
-        _st_save(tensors, tmp,
-                 metadata={"format": "h3_motion_context_av_v1"})
+        _st_save(tensors, tmp, metadata=metadata)
         try:
             os.replace(tmp, path)
         except OSError:
@@ -1052,7 +1098,10 @@ class MiniMaxH3MotionContextSaveLatent:
         else:
             path = os.path.join(folder, "%s_%05d_.safetensors"
                                 % (filename, counter))
-        _write_safetensors(path, {"video": video, "audio": audio})
+        extra = {}
+        if latent.get(SONG_END_KEY) is not None:
+            extra[SONG_END_KEY] = repr(float(latent[SONG_END_KEY]))
+        _write_safetensors(path, {"video": video, "audio": audio}, extra)
         _LOG.info("h3_motion_context: saved AV latent to %s (video %s, "
                   "audio %s)", path, tuple(video.shape), tuple(audio.shape))
         return (path,)
@@ -1140,7 +1189,11 @@ class MiniMaxH3MotionContextLoadLatent:
         # a plain list, not a NestedTensor: only this repo's context_latent
         # input accepts it, which is the point -- it cannot be mistaken
         # for a decodable latent without failing loudly downstream
-        return ({"samples": [video, audio]},)
+        out = {"samples": [video, audio]}
+        song_end = _read_song_end(path)
+        if song_end is not None:
+            out[SONG_END_KEY] = song_end
+        return (out,)
 
 
 class MiniMaxH3MotionContextChain:

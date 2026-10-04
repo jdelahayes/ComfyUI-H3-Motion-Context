@@ -8,6 +8,40 @@ rejected any keyframe anchor other than the first or last frame. That
 landed in ComfyUI 0.34.0. Every release through 0.33.4 has the older
 layout. Each entry below says which of the two it works with.
 
+## 0.7.0 - 2026-10-04
+
+Requires ComfyUI 0.34.0 or newer (Audio Lock: 0.35.0, for the nested
+noise_mask). Use 0.3.1 on anything older.
+
+- New node, H3 Motion Context Audio Lock: locks an existing song into
+  the clip so H3 renders picture only. It positions the song in the
+  chain itself: the delivered end of each clip rides the latent through
+  Save/Load, and the next window starts `trim_frames` early to cover
+  the pinned head. Mono songs are made stereo, any rate is resampled,
+  and windows are cut and padded in the waveform, never in the latent.
+- Motion Context `pin_audio` (default on). Off pins picture only, for
+  graphs where the soundtrack is locked.
+- Save Latent stores the song position in the file's metadata, Load
+  Latent returns it. Older files load as before.
+- New node, H3 Motion Context Planner: a chain planned from timecodes,
+  one prompt per segment plus a shared prefix and suffix. For the clip
+  being made it outputs the prompt and the length to render, snapped
+  to the nearest H3 length so each cut lands within 8 frames of its
+  timecode, with no drift down the chain. It reads which clip from the
+  Save Latent node and the head from Motion Context, so the Chain node
+  drives it unchanged. A `/h3_motion_context/plan` route serves the
+  same computation to the plan editor.
+- Plan editor: the Planner shows the chain clip by clip and opens a
+  table editor, one row per segment with a growing prompt box, live
+  lengths and cut errors, full-size prompt editing, final-prompt
+  preview, insert/delete/swap, and text import/export. Editing the
+  timing of a clip already on disk asks first.
+- Chain shows `plan k/N` with a Planner in the graph and stops after the
+  last clip; Chain and Approve refuse to go past it.
+- Trim `tail_trim`: frames off the end, picture and sound together.
+  The Planner sets it on the last clip to remove the overshoot past
+  the final timecode.
+
 ## 0.6.2 - 2026-09-06
 
 Requires ComfyUI 0.34.0 or newer. Use 0.3.1 on anything older.

@@ -4,6 +4,7 @@ import { api } from "../../scripts/api.js";
 const LOAD = "MiniMaxH3MotionContextLoadLatent";
 const SAVE = "MiniMaxH3MotionContextSaveLatent";
 const CHAIN = "MiniMaxH3MotionContextChain";
+const PLANNER = "MiniMaxH3MotionContextPlanner";
 const MAX = 9999;
 
 const CSS = `
@@ -84,6 +85,20 @@ function clipWidget(node) {
 
 function readClip(node) {
   return (clipWidget(node)?.value | 0) || 0;
+}
+
+// Clips in the Planner's plan, or 0 when there is no (valid) Planner.
+// h3_planner.js keeps node._h3plan up to date from the plan route.
+function planCount(ctrl) {
+  const planners = graphNodes(ctrl.graph || app.graph)
+    .filter((n) => n.comfyClass === PLANNER);
+  if (planners.length !== 1) return 0;
+  const p = planners[0]._h3plan;
+  return p?.ok ? (p.count | 0) : 0;
+}
+
+function planDone(ctrl, n) {
+  ctrl._h3mc.note = `Plan complete: all ${n} clip${n === 1 ? "" : "s"} made.`;
 }
 
 function widgetValue(node, name) {
@@ -176,13 +191,16 @@ function paint(ctrl) {
   const a = readClip(pair.load);
   const b = readClip(pair.save);
   const left = ctrl._h3mc.remaining | 0;
+  const n = planCount(ctrl);
+  const plan = n ? `  ·  plan ${Math.min(b, n)}/${n}` : "";
   if (ctrl._h3mc.chaining) {
     meta.textContent = left
-      ? `Chaining  Load ${a} / Save ${b}  ·  ${left} left`
-      : `Chaining  Load ${a} / Save ${b}`;
+      ? `Chaining  Load ${a} / Save ${b}${plan}  ·  ${left} left`
+      : `Chaining  Load ${a} / Save ${b}${plan}`;
   } else {
-    meta.textContent = `Load ${a} / Save ${b}`;
+    meta.textContent = `Load ${a} / Save ${b}${plan}`;
   }
+  if (ctrl._h3mc.note) meta.textContent += `  ·  ${ctrl._h3mc.note}`;
   const chainBtn = ctrl._h3mc.chainBtn;
   if (chainBtn) {
     chainBtn.textContent = ctrl._h3mc.chaining ? "Stop" : "Chain";
@@ -235,6 +253,11 @@ async function startChain(ctrl) {
     await queueOnce(ctrl);
     return true;
   }
+  const n = planCount(ctrl);
+  if (n && save + 1 > n) {
+    planDone(ctrl, n);
+    return false;
+  }
   if (!advance(ctrl)) return false;
   await queueOnce(ctrl);
   return true;
@@ -258,6 +281,16 @@ function onPromptDone(ok) {
   }
   if (!ctrl._h3mc.chaining) {
     live = null;
+    paint(ctrl);
+    return;
+  }
+  // with a Planner in the graph, its last clip ends the chain
+  const n = planCount(ctrl);
+  const pair = findPair(ctrl);
+  if (n && pair && readClip(pair.save) >= n) {
+    ctrl._h3mc.chaining = false;
+    live = null;
+    planDone(ctrl, n);
     paint(ctrl);
     return;
   }
@@ -307,7 +340,7 @@ app.registerExtension({
       reroll.title = "Queue at the current Load/Save indices. Use this instead of ComfyUI's Run button.";
       const chainBtn = document.createElement("button");
       chainBtn.textContent = "Chain";
-      chainBtn.title = "Approve on a loop. segments > 0 stops after that many clips; 0 runs until Stop.";
+      chainBtn.title = "Approve on a loop. segments > 0 stops after that many clips; 0 runs until Stop. With a Planner, stops after its last clip.";
       const resetBtn = document.createElement("button");
       resetBtn.textContent = "Reset";
       resetBtn.title = "Set Load 0 / Save 1. Does not queue or delete files.";
@@ -322,17 +355,26 @@ app.registerExtension({
       root.append(row, row2, row3, meta);
       swallow(root);
       this.addDOMWidget("h3mc_chain", "CHAIN", root, { serialize: false });
-      this._h3mc = { chaining: false, awaiting: false, remaining: 0, meta, chainBtn };
+      this._h3mc = { chaining: false, awaiting: false, remaining: 0, meta, chainBtn, note: "" };
       approve.onclick = async (e) => {
         e.stopPropagation();
         if (this._h3mc.awaiting) return;
+        this._h3mc.note = "";
         stopChain(this);
+        const n = planCount(this);
+        const pair = findPair(this);
+        if (n && pair && readClip(pair.save) + 1 > n) {
+          planDone(this, n);
+          paint(this);
+          return;
+        }
         if (!advance(this)) return;
         await queueOnce(this);
       };
       reroll.onclick = async (e) => {
         e.stopPropagation();
         if (this._h3mc.awaiting) return;
+        this._h3mc.note = "";
         stopChain(this);
         await queueOnce(this);
       };
@@ -347,6 +389,7 @@ app.registerExtension({
           paint(this);
           return;
         }
+        this._h3mc.note = "";
         this._h3mc.chaining = true;
         this._h3mc.remaining = readSegments(this);
         paint(this);
@@ -355,6 +398,7 @@ app.registerExtension({
       resetBtn.onclick = (e) => {
         e.stopPropagation();
         if (this._h3mc.awaiting) return;
+        this._h3mc.note = "";
         stopChain(this);
         resetFirst(this);
       };
@@ -367,14 +411,19 @@ app.registerExtension({
           return;
         }
         const n = await clearLatents(pair);
+        this._h3mc.note = n
+          ? `Removed ${n} numbered slot${n === 1 ? "" : "s"}. Custom names kept.`
+          : "No numbered chain slots to remove.";
         paint(this);
-        if (this._h3mc?.meta) {
-          this._h3mc.meta.textContent = n
-            ? `Removed ${n} numbered slot${n === 1 ? "" : "s"}. Custom names kept.`
-            : "No numbered chain slots to remove.";
-        }
       };
       paint(this);
+      this._h3mcTimer = setInterval(() => {
+        if (!this.graph) {
+          clearInterval(this._h3mcTimer);
+          return;
+        }
+        if (!this._h3mc.awaiting) paint(this);
+      }, 2000);
       this.setSize?.([270, 168]);
       return r;
     };

@@ -35,9 +35,25 @@ from .probe_node import (
     NODE_DISPLAY_NAME_MAPPINGS as _PROBE_NAMES,
 )
 
+from .audio_lock import (
+    NODE_CLASS_MAPPINGS as _LOCK_CLASSES,
+    NODE_DISPLAY_NAME_MAPPINGS as _LOCK_NAMES,
+)
+
 NODE_CLASS_MAPPINGS.update(_PROBE_CLASSES)
 NODE_DISPLAY_NAME_MAPPINGS.update(_PROBE_NAMES)
+from .planner import (
+    NODE_CLASS_MAPPINGS as _PLAN_CLASSES,
+    NODE_DISPLAY_NAME_MAPPINGS as _PLAN_NAMES,
+    register_planner_routes,
+)
+
+NODE_CLASS_MAPPINGS.update(_LOCK_CLASSES)
+NODE_DISPLAY_NAME_MAPPINGS.update(_LOCK_NAMES)
+NODE_CLASS_MAPPINGS.update(_PLAN_CLASSES)
+NODE_DISPLAY_NAME_MAPPINGS.update(_PLAN_NAMES)
 register_chain_routes()
+register_planner_routes()
 
 logging.getLogger("h3_motion_context").info(
     "h3_motion_context: nodes registered. ComfyUI is not modified; the "
